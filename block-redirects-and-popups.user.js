@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Block Redirects, Popups, and External Tab Opening
 // @namespace    https://github.com/dripnodrizzle/Tampermonkey
-// @version      1.2.0
+// @version      1.3.0
 // @description  Blocks page redirects, popups, and tab opening to other sites when clicking on the screen
 // @author       dripnodrizzle
 // @match        *://*/*
@@ -169,6 +169,96 @@
             console.warn('[BlockScript] Blocked form submission to external URL:', action);
         }
     }, true);
+
+    // ── 6. Intercept history.pushState / replaceState before 3rd-party scripts ─
+    // The "culprit" analytics script (Cloudflare beacon) wraps history.pushState
+    // to track SPA navigation.  By wrapping it ourselves first (we run at
+    // document-start, before any page script), our layer is the innermost one.
+    // This also lets us log any unusual URL patterns pushed into history.
+    (function patchHistory() {
+        ['pushState', 'replaceState'].forEach(function (method) {
+            const native = history[method];
+            if (typeof native !== 'function') return;
+            history[method] = function (state, title, url) {
+                if (url !== undefined && url !== null && isExternalUrl(String(url))) {
+                    console.warn('[BlockScript] Blocked history.' + method + '() to external-like URL:', url);
+                    return;
+                }
+                return native.apply(this, arguments);
+            };
+        });
+    })();
+
+    // ── 7. Block culprit <script id="*override*"> and neutralize override elems ─
+    // The culprit analytics script is injected via a <script> whose id contains
+    // "override".  Removing it the instant it appears in the DOM prevents it from
+    // running (works for defer/async scripts and dynamically-injected ones).
+    // For non-script elements with "override" in their id we strip onclick and
+    // block clicks so they cannot trigger external redirects.
+
+    function neutralizeOverrideEl(el) {
+        if (el.nodeType !== 1) return;
+        if (!el.id || !/override/i.test(el.id)) return;
+
+        if (el.tagName === 'SCRIPT') {
+            el.remove();
+            console.warn('[BlockScript] Removed culprit script (override id):', el.id);
+            return;
+        }
+
+        // Strip inline onclick that could trigger a redirect
+        if (el.getAttribute('onclick')) {
+            el.removeAttribute('onclick');
+        }
+        // Strip external href on anchor tags
+        if (el.tagName === 'A') {
+            const href = el.getAttribute('href');
+            if (href && isExternalUrl(href)) {
+                el.removeAttribute('href');
+            }
+        }
+        // Prevent any remaining click on this element from propagating
+        el.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            console.warn('[BlockScript] Blocked click on override element:', el.id);
+        }, true);
+    }
+
+    function neutralizeOverrideElements(root) {
+        const context = root || document;
+        Array.from(context.querySelectorAll('[id]')).filter(function (el) {
+            return /override/i.test(el.id);
+        }).forEach(neutralizeOverrideEl);
+    }
+
+    // MutationObserver active from document-start so it catches every inserted node
+    const overrideObserver = new MutationObserver(function (mutations) {
+        mutations.forEach(function (mutation) {
+            mutation.addedNodes.forEach(function (node) {
+                if (node.nodeType !== 1) return;
+                neutralizeOverrideEl(node);
+                // Also scan inside the subtree that was added
+                if (typeof node.querySelectorAll === 'function') {
+                    neutralizeOverrideElements(node);
+                }
+            });
+        });
+    });
+
+    overrideObserver.observe(document.documentElement || document.body || document, {
+        childList: true,
+        subtree: true
+    });
+
+    // Scan elements that are already present (e.g. if readyState is not 'loading')
+    if (document.readyState !== 'loading') {
+        neutralizeOverrideElements();
+    } else {
+        document.addEventListener('DOMContentLoaded', function () {
+            neutralizeOverrideElements();
+        });
+    }
 
     console.info('[BlockScript] Block Redirects, Popups, and External Tab Opening – active on', currentOrigin);
 })();

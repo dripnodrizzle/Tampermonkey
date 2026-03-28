@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Block Redirects, Popups, and External Tab Opening
 // @namespace    https://github.com/dripnodrizzle/Tampermonkey
-// @version      1.0.0
+// @version      1.1.0
 // @description  Blocks page redirects, popups, and tab opening to other sites when clicking on the screen
 // @author       dripnodrizzle
 // @match        *://*/*
@@ -26,8 +26,10 @@
     }
 
     // ── 1. Block window.open (popups and new tabs) ────────────────────────────
+    // Use Object.defineProperty so page scripts that run later cannot overwrite
+    // our override.
     const _windowOpen = window.open.bind(window);
-    window.open = function (url, target, features) {
+    const _blockedOpen = function (url, target, features) {
         if (!url) return null;
         if (isExternalUrl(url)) {
             console.warn('[BlockScript] Blocked window.open to external URL:', url);
@@ -35,50 +37,56 @@
         }
         return _windowOpen(url, target, features);
     };
+    try {
+        Object.defineProperty(window, 'open', {
+            value: _blockedOpen,
+            writable: false,
+            configurable: false
+        });
+    } catch (e) {
+        window.open = _blockedOpen;
+    }
 
     // ── 2. Block external redirects via window.location ──────────────────────
-    // We proxy the `location` object so that assigning `window.location.href`
-    // to an external URL is caught and cancelled.
+    // `window.location` is non-configurable in all modern browsers, so a Proxy
+    // over it will silently fail.  Instead, patch Location.prototype directly:
+    // override the `href` setter and the `assign`/`replace` methods.
     (function blockLocationRedirects() {
-        const descriptor = Object.getOwnPropertyDescriptor(window, 'location');
-        // `location` is typically non-configurable on some browsers; guard accordingly
-        if (!descriptor || !descriptor.configurable) return;
-
-        const _location = window.location;
-
-        const locationProxy = new Proxy(_location, {
-            set(target, prop, value) {
-                if (prop === 'href' && isExternalUrl(value)) {
-                    console.warn('[BlockScript] Blocked location redirect to:', value);
-                    return true; // silently ignore
-                }
-                target[prop] = value;
-                return true;
-            },
-            get(target, prop) {
-                if (prop === 'assign' || prop === 'replace') {
-                    return function (url) {
-                        if (isExternalUrl(url)) {
-                            console.warn('[BlockScript] Blocked location.' + prop + '() to:', url);
-                            return;
-                        }
-                        target[prop](url);
-                    };
-                }
-                const val = target[prop];
-                return typeof val === 'function' ? val.bind(target) : val;
-            }
-        });
-
-        try {
-            Object.defineProperty(window, 'location', {
-                get() { return locationProxy; },
+        // --- href setter ---
+        const hrefDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+        if (hrefDesc && hrefDesc.set) {
+            const nativeSet = hrefDesc.set;
+            Object.defineProperty(Location.prototype, 'href', {
+                get: hrefDesc.get,
+                set(url) {
+                    if (isExternalUrl(url)) {
+                        console.warn('[BlockScript] Blocked location.href redirect to:', url);
+                        return;
+                    }
+                    nativeSet.call(this, url);
+                },
+                enumerable: hrefDesc.enumerable,
                 configurable: true
             });
-        } catch (e) {
-            // If we can't redefine location, fall through – click-based blocking
-            // (step 4) will still cover the common cases.
         }
+
+        // --- assign() and replace() ---
+        ['assign', 'replace'].forEach(function (method) {
+            const native = Location.prototype[method];
+            if (typeof native !== 'function') return;
+            Object.defineProperty(Location.prototype, method, {
+                value: function (url) {
+                    if (isExternalUrl(url)) {
+                        console.warn('[BlockScript] Blocked location.' + method + '() to:', url);
+                        return;
+                    }
+                    native.call(this, url);
+                },
+                writable: true,
+                configurable: true,
+                enumerable: Location.prototype.propertyIsEnumerable(method)
+            });
+        });
     })();
 
     // ── 3. Block meta-refresh redirects ──────────────────────────────────────

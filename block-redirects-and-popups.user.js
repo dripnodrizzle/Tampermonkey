@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Block Redirects, Popups, and External Tab Opening
 // @namespace    https://github.com/dripnodrizzle/Tampermonkey
-// @version      1.1.0
+// @version      1.2.0
 // @description  Blocks page redirects, popups, and tab opening to other sites when clicking on the screen
 // @author       dripnodrizzle
 // @match        *://*/*
